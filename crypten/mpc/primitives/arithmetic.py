@@ -19,7 +19,7 @@ from crypten.cuda import CUDALongTensor
 from crypten.debug import debug_mode
 from crypten.encoder import FixedPointEncoder
 
-from . import beaver
+from . import beaver, resharing
 
 
 SENTINEL = -1
@@ -336,9 +336,14 @@ class ArithmeticSharedTensor(object):
             else:  # ['mul', 'matmul', 'convNd', 'conv_transposeNd']
                 # NOTE: 'mul_' calls 'mul' here
                 # Must copy share.data here to support 'mul_' being inplace
-                result.share.set_(
-                    getattr(beaver, op)(result, y, *args, **kwargs).share.data
-                )
+                if comm.get().get_world_size() == 3:
+                    result.share.set_(
+                        getattr(resharing, op)(result, y, *args, **kwargs).share.data
+                    )
+                else:
+                    result.share.set_(
+                        getattr(beaver, op)(result, y, *args, **kwargs).share.data
+                    )
         else:
             raise TypeError("Cannot %s %s with %s" % (op, type(y), type(self)))
 
@@ -346,11 +351,17 @@ class ArithmeticSharedTensor(object):
         if not additive_func:
             if public:  # scale by self.encoder.scale
                 if self.encoder.scale > 1:
+                    if comm.get().get_world_size() == 3:
+                        result.share.set_(resharing.truncation(result, result.encoder.scale).share.data)
+                        return result
                     return result.div_(result.encoder.scale)
                 else:
                     result.encoder = self.encoder
             else:  # scale by larger of self.encoder.scale and y.encoder.scale
                 if self.encoder.scale > 1 and y.encoder.scale > 1:
+                    if comm.get().get_world_size() == 3:
+                        result.share.set_(resharing.truncation(result, result.encoder.scale).share.data)
+                        return result
                     return result.div_(result.encoder.scale)
                 elif self.encoder.scale > 1:
                     result.encoder = self.encoder
@@ -633,7 +644,12 @@ class ArithmeticSharedTensor(object):
         return self
 
     def square(self):
-        return self.clone().square_()
+        result = self.clone()
+        if comm.get().get_world_size() == 3:
+            result.share = resharing.square(self).div_(self.encoder.scale).share
+        else:
+            result.share = beaver.square(self).div_(self.encoder.scale).share
+        return result
 
     def dot(self, y, weights=None):
         """Compute a dot product between two tensors"""
